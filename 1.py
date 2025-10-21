@@ -15,7 +15,7 @@ class ResultsTable(QMainWindow, Ui_MainWindow):
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.schools = []
         self.classes = []
-        self.fillTable("1.csv")
+        self.fillTable("files/1.csv")
         self.fillComboBox(self.comboSchool, self.schools)
         self.fillComboBox(self.comboClass, self.classes)
 
