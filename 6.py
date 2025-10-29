@@ -2,11 +2,14 @@ import hashlib
 import sqlite3
 import sys
 
-from PyQt6.QtCore import QTimer, Qt
-from PyQt6.QtGui import QKeyEvent, QStandardItemModel, QStandardItem
-from PyQt6.QtWidgets import QApplication, QMainWindow, QLineEdit, QMenu
+from PyQt6.QtCore import QTimer, Qt, QRegularExpression, QRect
+from PyQt6.QtGui import QKeyEvent, QStandardItemModel, QStandardItem, QRegularExpressionValidator, QIntValidator, \
+    QPixmap
+from PyQt6.QtWidgets import QApplication, QMainWindow, QLineEdit, QMenu, QHeaderView, QDialog, QStyledItemDelegate, \
+    QTableWidget, QTableView, QMessageBox
 
-from uis.ui_6 import Ui_MainWindow
+from uis.ui_6_auth import Ui_MainWindow
+from uis.ui_6_edit import Ui_Dialog
 from uis.ui_6_lib import Ui_LibWindow
 
 
@@ -114,6 +117,8 @@ class Library(QMainWindow, Ui_LibWindow):
         self.setWindowTitle(f"Library - {username}")
         self.model = QStandardItemModel()
         self.connection = sqlite3.connect("files/6.sqlite")
+        self.searchAuthor.textChanged.connect(self.filter)
+        self.searchTitle.textChanged.connect(self.filter)
         self.initTable()
 
     def initTable(self):
@@ -127,7 +132,20 @@ class Library(QMainWindow, Ui_LibWindow):
                                          "added_by TEXT NOT NULL)")
         self.connection.commit()
         self.refillTable()
-        self.table.selectionModel().selectionChanged.connect(self.updateSelection)
+
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
+        self.table.setColumnWidth(0, 50)
+        self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
+        self.table.setColumnWidth(3, 70)
+        self.table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
+        self.table.setColumnWidth(4, 100)
+        self.table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.Fixed)
+        self.table.setColumnWidth(5, 70)
+
+        self.table.verticalHeader().setVisible(False)
+        self.table.setItemDelegate(ImageDelegate(self.table, self))
+        self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
 
     def refillTable(self):
         model = QStandardItemModel()
@@ -137,12 +155,15 @@ class Library(QMainWindow, Ui_LibWindow):
         model.setHorizontalHeaderLabels(headers)
         if len(data) > 0:
             for row in data:
-                model.appendRow([QStandardItem(str(item)) for item in row])
+                model.appendRow([QStandardItem(str(item)) if str(item) != "None" else QStandardItem() for item in row])
         self.table.setModel(model)
+        for row in range(model.rowCount()):
+            self.table.setRowHeight(row, 100)
         self.model = model
+        self.table.selectionModel().selectionChanged.connect(self.updateSelection)
 
     def updateSelection(self):
-        self.selectedRows = set([item.row() for item in self.table.selectionModel().selectedIndexes()])
+        self.selectedRows = list(set([item.row() for item in self.table.selectionModel().selectedIndexes()]))
 
     def contextMenuEvent(self, event):
         context = QMenu(self)
@@ -167,13 +188,156 @@ class Library(QMainWindow, Ui_LibWindow):
         context.exec(event.globalPos())
 
     def addBook(self):
-        pass
+        dialog = EditDialog("add", "files/6.sqlite", self.username, parent=self)
+        dialog.show()
+        dialog.finished.connect(self.refillTable)
 
     def editBook(self):
-        pass
+        bookId = int(self.model.item(self.selectedRows[0], 0).text())
+        dialog = EditDialog("edit", "files/6.sqlite", self.username, bookId=bookId,  parent=self)
+        dialog.show()
+        dialog.finished.connect(self.refillTable)
 
     def deleteBook(self):
-        pass
+        accept = QMessageBox.question(self, "Warning", f"Do you really want to delete {len(self.selectedRows)} book(s)?",
+                                      QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if accept:
+            ids = [int(self.model.item(row, 0).text()) for row in self.selectedRows]
+            try:
+                self.connection.cursor().execute(f"DELETE FROM books WHERE id IN ({','.join('?' * len(ids))})",
+                                                 ids)
+                self.connection.commit()
+                self.refillTable()
+            except sqlite3.Error as e:
+                QMessageBox.critical(self, "Error", f"Database error: {e}")
+
+    def filter(self):
+        title = self.searchTitle.text().lower()
+        author = self.searchAuthor.text().lower()
+        for row in range(self.model.rowCount()):
+            match = ((title in self.model.item(row, 1).text().lower() or title == "")
+                     and (author in self.model.item(row, 2).text().lower() or author == ""))
+            self.table.setRowHidden(row, not match)
+
+class EditDialog(QDialog, Ui_Dialog):
+    def __init__(self, mode: str, db: str, user: str, bookId=-1, parent=None):
+        super().__init__(parent)
+        self.setupUi(self)
+        self.mode = mode
+        self.bookId = bookId
+        self.user = user
+        self.setModal(True)
+        self.connection = sqlite3.connect(db)
+        self.initTable()
+        self.setWindowTitle("Add book" if mode == "add" else "Edit book")
+        self.buttonBox.accepted.connect(self.addBook if mode == "add" else self.editBook)
+        self.buttonBox.rejected.connect(self.reject)
+
+    def initTable(self):
+        model = QStandardItemModel()
+        cursor = self.connection.cursor()
+        cursor.execute("SELECT * FROM books WHERE id = ?", (self.bookId, ))
+        headers = [header[0] for header in cursor.description]
+        model.setHorizontalHeaderLabels(headers)
+        data = cursor.fetchall()
+        if len(data) > 0:
+            model.appendRow([QStandardItem(str(item)) if str(item) != "None" else QStandardItem() for item in data[0]])
+        else:
+            model.appendRow([QStandardItem()] * len(headers))
+        if self.mode == "add":
+            model.setItem(0, len(headers) - 1, QStandardItem(self.user))
+        self.tableView.setModel(model)
+        self.tableView.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.tableView.verticalHeader().setVisible(False)
+        self.tableView.setItemDelegate(ValidatorDelegate(self.tableView, self))
+        self.tableView.setEditTriggers(QTableView.EditTrigger.DoubleClicked)
+
+        self.tableView.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.tableView.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
+        self.tableView.setColumnWidth(0, 50)
+        self.tableView.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
+        self.tableView.setColumnWidth(3, 70)
+        self.tableView.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
+        self.tableView.setColumnWidth(4, 70)
+        self.tableView.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.Fixed)
+        self.tableView.setColumnWidth(5, 100)
+
+    def addBook(self):
+        values = self.getValues()
+        self.sendRequest("INSERT INTO books (title, author, year, genre, image, added_by) "
+                         "VALUES (?, ?, ?, ?, ?, ?)", values[1:])
+
+    def editBook(self):
+        values = self.getValues()
+        values.append(values[0])
+        self.sendRequest("UPDATE books SET title = ?, author = ?, year = ?, "
+                         "genre = ?, image = ?, added_by = ? WHERE id = ?", values[1:])
+
+    def sendRequest(self, req: str, values):
+        try:
+            self.connection.cursor().execute(req, values)
+            self.connection.commit()
+            self.connection.close()
+            super().accept()
+        except sqlite3.Error as e:
+            QMessageBox.critical(self, "Error", f"Database error: {e}")
+
+    def getValues(self):
+        model = self.tableView.model()
+        values = []
+        for column in range(model.columnCount()):
+            values.append(model.data(model.index(0, column)))
+        return values
+
+    def reject(self):
+        self.connection.close()
+        super().reject()
+
+
+class ValidatorDelegate(QStyledItemDelegate):
+    def __init__(self, table: QTableWidget, parent=None):
+        super().__init__(parent)
+        self.table = table
+
+    def createEditor(self, parent, option, index):
+        editor = QLineEdit(parent)
+        header = self.table.model().headerData(index.column(), Qt.Orientation.Horizontal)
+        if header in ["id", "added_by"]:
+            editor.setReadOnly(True)
+        elif header in ["title", "author", "image"]:
+            editor.setValidator(QRegularExpressionValidator(QRegularExpression(r".{0,30}")))
+        elif header == "genre":
+            editor.setValidator(QRegularExpressionValidator(QRegularExpression(r".{0,15}")))
+        elif header == "year":
+            editor.setValidator(QIntValidator(1701, 2025))
+        return editor
+
+
+class ImageDelegate(QStyledItemDelegate):
+    def __init__(self, table: QTableView, parent=None):
+        super().__init__(parent)
+        self.table = table
+
+    def paint(self, painter, option, index):
+        header = self.table.model().headerData(index.column(), Qt.Orientation.Horizontal)
+        if header == "image":
+            path = self.table.model().item(index.row(), index.column()).text()
+            pixmap = QPixmap(path)
+            if pixmap.isNull():
+                pixmap.load("files/images/default.jpg")
+            pixmap = pixmap.scaled(
+                option.rect.width() - 4,
+                option.rect.height() - 4,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation
+            )
+            if pixmap:
+                x = option.rect.center().x() - pixmap.width() // 2
+                y = option.rect.center().y() - pixmap.height() // 2
+                painter.drawPixmap(QRect(x, y, pixmap.width(), pixmap.height()), pixmap)
+        else:
+            super().paint(painter, option, index)
+
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
